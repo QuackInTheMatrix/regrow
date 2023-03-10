@@ -5,11 +5,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
-#include <sys/random.h>
+#include <math.h>
 
 struct client_state{
     struct wl_display *display;
@@ -27,7 +28,9 @@ struct client_state{
     uint16_t height_render;
     uint16_t width_render;
     uint16_t currentRow;
-    uint16_t branch_size;
+    uint16_t tree_size;
+    uint16_t branch_width;
+    uint16_t tree_type;
 
     struct wl_buffer* treeBuffer;
 };
@@ -118,6 +121,22 @@ static const struct wl_buffer_listener buffer_listener = {
         .release = wl_buffer_release
 };
 
+void draw_tree_new(uint32_t* data, int position, uint16_t width, uint16_t height, uint16_t tree_size, uint16_t branch_width){
+    if (tree_size>20 && branch_width>20 && position-width*tree_size-width*50>0) {
+        for (int i = 0; i < tree_size; ++i) {
+            data[position] = 0xFFA52A2A;
+            position -= width;
+        }
+        for (int i = 0; i < branch_width; ++i) {
+            data[position - i - ((width) * (int) (50 * sin(i * 3.1414 / 180)))] = 0xFF00FF00;
+            data[position + i - ((width) * (int) (50 * sin(i * 3.1414 / 180)))] = 0xFF00FF00;
+        }
+        tree_size-=tree_size/5;
+        branch_width/=2;
+        draw_tree_new(data,position,width,height,tree_size,branch_width);
+    }
+}
+
 void draw_branches(uint32_t* data,int position, uint16_t* width, uint16_t* height, uint16_t* branch_size){
     if (position>(*width)*(*branch_size)) {
         for (int i = 0; i <(*branch_size); i++) {
@@ -131,6 +150,7 @@ void draw_branches(uint32_t* data,int position, uint16_t* width, uint16_t* heigh
 
 void draw_tree(uint32_t* data, uint16_t width, uint16_t height, uint16_t branch_size){
     int position = width/2+width*(height-height/4);
+    branch_size=branch_size/2;
     for (int i = height; i > height-height/4; i--) {
         data[width/2+width*i]=0xFFA52A2A;
     }
@@ -159,10 +179,14 @@ static struct wl_buffer *draw_frame(struct client_state *state){
     int offset = state->offset%bar_size;
     // writing the "pixels"(bytes) to the buffer
 
-    // draw tree
-    draw_tree(pool_data,width,height,state->branch_size);
+    if (state->tree_type==0) {
+        // draw tree
+        draw_tree(pool_data, width, height, state->branch_width);
+    }else{
+        //draw new tree
+        draw_tree_new(pool_data,width/2+width*(height-1),width,height,state->tree_size,state->branch_width);
 
-
+    }
 //    for (int y = 0; y < height; ++y) {
 //        for (int x = 0; x < width; ++x) {
 //            position = (x+y+offset)%bar_size;
@@ -225,7 +249,7 @@ static struct wl_buffer* create_tree_buffer(struct client_state* state){
     wl_shm_pool_destroy(pool);
     close(fd);
 
-    draw_tree(pool_data,width,height,state->branch_size);
+    draw_tree(pool_data,width,height,state->branch_width);
 
     munmap(pool_data,shm_pool_size);
     wl_buffer_add_listener(buffer,&buffer_listener, NULL);
@@ -263,17 +287,17 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
             state->width_render++;
     }
     if (state->currentRow>0) {
-        state->currentRow -= 20;
+        state->currentRow -= 5;
     }else{
         state->currentRow = 1000;
-        getrandom(&state->branch_size,8,0);
-        state->branch_size=state->branch_size%100+50;
+        state->branch_width=rand()%(1920/2)+50;
+        state->tree_size=rand()%(1000/2)+100;
+        state->tree_type=rand()%2;
     }
     struct wl_buffer *buffer = draw_frame(state);
     wl_surface_attach(state->wl_surface,buffer,0,0);
-    wl_surface_damage_buffer(state->wl_surface,0,state->currentRow-1,1920,1);
+    wl_surface_damage_buffer(state->wl_surface,0,state->currentRow,1920,1);
     wl_surface_commit(state->wl_surface);
-
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME,&ts);
     state->last_frame = ts.tv_sec;
@@ -287,14 +311,16 @@ static const struct wl_callback_listener wl_surface_frame_listener = {
 // up - loads a buffer with the tree
 // down - loads an empty buffer to overwrite/delete the tree
 int main(int argc, char *argv[]){
+    srand(time(NULL));
     struct client_state state = {0};
     state.currentRow=1000;
     state.height_render=0;
     state.width_render=0;
     state.offset=0;
     state.last_frame=0;
-    getrandom(&state.branch_size,8,0);
-    state.branch_size=state.branch_size%100+50;
+    state.branch_width=rand()%(1920/2)+50;
+    state.tree_size=rand()%(1000/2)+100;
+    state.tree_type=rand()%2;
     // connects the display with the given name(NULL=wayland-0)
     state.display = wl_display_connect(NULL);
     if(!state.display){
