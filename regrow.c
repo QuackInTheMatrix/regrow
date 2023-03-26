@@ -280,37 +280,12 @@ static struct wl_buffer* create_empty_buffer(struct client_state* state){
     return buffer;
 }
 
-static struct wl_buffer* create_tree_buffer(struct client_state* state){
-    const int width = 1920, height=1000;
-    // each pixel contains 4 bytes
-    const int stride = width*4;
-    // velicina buffera
-    const int shm_pool_size = height * stride;
-    int fd = allocate_shm_file(shm_pool_size);
-
-    // mmap vraca pointer na alociranu memoriju
-    uint32_t *pool_data = mmap(NULL,shm_pool_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-    // struktura koja moze drzati buffere
-    struct wl_shm_pool *pool = wl_shm_create_pool(state->shm,fd,shm_pool_size);
-    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,width,height,stride,WL_SHM_FORMAT_XRGB8888);
-
-    wl_shm_pool_destroy(pool);
-    close(fd);
-
-    draw_tree(pool_data,width,height,state->branch_width);
-
-    munmap(pool_data,shm_pool_size);
-    wl_buffer_add_listener(buffer,&buffer_listener, NULL);
-    return buffer;
-}
-
 void xdg_surface_handle_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial){
     struct client_state *state = data;
+    //acknowledge that the next frame is ready
     xdg_surface_ack_configure(state->xdg_surface,serial);
 
-    struct wl_buffer *buffer = create_empty_buffer(data);
-    state->treeBuffer = create_tree_buffer(data);
-    wl_surface_attach(state->wl_surface,buffer,0,0);
+    wl_surface_attach(state->wl_surface,state->emptyBuffer,0,0);
     wl_surface_commit(state->wl_surface);
 }
 
@@ -321,9 +296,10 @@ static const struct xdg_surface_listener surface_listener = {
 static const struct wl_callback_listener wl_surface_frame_listener;
 
 void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_t callback_data){
-    wl_callback_destroy(wl_callback);
-
     struct client_state *state = data;
+
+    // destroy and create a new listener for the next frame
+    wl_callback_destroy(wl_callback);
     wl_callback = wl_surface_frame(state->wl_surface);
     wl_callback_add_listener(wl_callback,&wl_surface_frame_listener,state);
 
@@ -341,6 +317,7 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
         state->is_drawing=false;
         state->currentRow +=5;
         if (state->currentRow==1000){
+            wl_buffer_destroy(state->treeBuffer);
             state->is_drawing=true;
             state->branch_width=rand()%(1920/2)+50;
             state->tree_size=rand()%(1000/2)+100;
@@ -404,16 +381,21 @@ int main(int argc, char *argv[]){
     // waits until pending requests and events are processed
     wl_display_roundtrip(state.display);
 
+    // initialize default buffers
     state.emptyBuffer = create_empty_buffer(&state);
+    state.treeBuffer = draw_frame(&state);
 
+    // setup cursor
     map_cursor_image(&state);
     wl_pointer_add_listener(state.wl_pointer, &wl_pointer_listener, &state);
+
     state.wl_surface = wl_compositor_create_surface(state.compositor);
 
     state.xdg_surface = xdg_wm_base_get_xdg_surface(state.xdg_wm_base,state.wl_surface);
     xdg_surface_add_listener(state.xdg_surface, &surface_listener,&state);
     state.xdg_toplevel = xdg_surface_get_toplevel(state.xdg_surface);
     xdg_toplevel_set_title(state.xdg_toplevel,"My window!");
+
     wl_surface_commit(state.wl_surface);
 
     struct wl_callback *wl_callback = wl_surface_frame(state.wl_surface);
