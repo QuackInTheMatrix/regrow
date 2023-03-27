@@ -13,6 +13,7 @@
 #include "xdg-shell-client-protocol.h"
 #include <math.h>
 #include <stdbool.h>
+#include <xkbcommon/xkbcommon.h>
 
 struct client_state{
     struct wl_display *display;
@@ -26,6 +27,7 @@ struct client_state{
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
     struct wl_pointer *wl_pointer;
+    struct wl_keyboard *wl_keyboard;
 
     uint8_t offset;
     uint32_t last_frame;
@@ -42,6 +44,9 @@ struct client_state{
     struct wl_buffer* emptyBuffer;
     struct wl_surface* wl_cursor_surface;
     struct wl_cursor_image* wl_cursor_image;
+    struct xkb_state* xkb_state;
+    struct xkb_context* xkb_context;
+    struct xkb_keymap* xkb_keymap;
 };
 
 static void randname(char *buf){
@@ -94,29 +99,51 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener = {
         .ping = xdg_wm_base_handle_ping
 };
 
+// event that's emitted when the cursor enters the surface
 void wl_pointer_enter_handle(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *surface, wl_fixed_t surface_x, wl_fixed_t surface_y){
     struct client_state *state = data;
     wl_pointer_set_cursor(wl_pointer, serial, state->wl_cursor_surface, state->wl_cursor_image->hotspot_x, state->wl_cursor_image->hotspot_y);
     printf("enter:\t%d %d\n",wl_fixed_to_int(surface_x),wl_fixed_to_int(surface_y));
 }
 
+// event that's emitted when the cursor leaves the surface
 void wl_pointer_leave_handle(void *data, struct wl_pointer *wl_pointer, uint32_t serial, struct wl_surface *surface){
     printf("Pointer left\n");
 }
 
+// event that's emitted when the cursor moves on the surface
 void wl_pointer_motion_handle(void *data, struct wl_pointer *wl_pointer, uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y){
     printf("Move:\t%d %d\n",wl_fixed_to_int(surface_x),wl_fixed_to_int(surface_y));
 }
 
+// event that's emitted when the pointer presses a button while on the surface(left click for example)
 void wl_pointer_button_handle(void *data, struct wl_pointer *wl_pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state){
     printf("button: 0x%x state: %d\n", button, state);
 }
 
+// event that's emitted when the pointer scrolls by mouse wheel, touch pad, etc.
 void wl_pointer_axis_handle(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis, wl_fixed_t value){
     printf("axis: %d %f\n", axis, wl_fixed_to_double(value));
 }
 
+// event that indicates that all pointer events have been received for a given frame
 void wl_pointer_frame_handle(void *data, struct wl_pointer *wl_pointer){
+    // this is where all the past pointer event data should be processed
+}
+
+void wl_pointer_axis_source(void *data, struct wl_pointer *wl_pointer, uint32_t axis_source){
+
+}
+
+void wl_pointer_axis_stop(void *data, struct wl_pointer *wl_pointer, uint32_t time, uint32_t axis){
+
+}
+
+void wl_pointer_axis_discrete(void *data, struct wl_pointer *wl_pointer, uint32_t axis, int32_t discrete){
+
+}
+
+void wl_pointer_axis_value120(void *data, struct wl_pointer *wl_pointer, uint32_t axis, int32_t value120){
 
 }
 
@@ -126,7 +153,128 @@ static const struct wl_pointer_listener wl_pointer_listener = {
         .motion = wl_pointer_motion_handle,
         .button = wl_pointer_button_handle,
         .axis = wl_pointer_axis_handle,
-        .frame = wl_pointer_frame_handle
+        .frame = wl_pointer_frame_handle,
+        .axis_source = wl_pointer_axis_source,
+        .axis_stop = wl_pointer_axis_stop,
+        .axis_discrete = wl_pointer_axis_discrete,
+        .axis_value120 = wl_pointer_axis_value120
+};
+
+void map_cursor_image(void* data){
+    struct client_state* state = data;
+    struct wl_cursor_theme* wl_cursor_theme = wl_cursor_theme_load("breeze_cursors", 24, state->shm);
+    struct wl_cursor* wl_cursor = wl_cursor_theme_get_cursor(wl_cursor_theme,"left_ptr");
+    state->wl_cursor_image = wl_cursor->images[0];
+    struct wl_buffer*  wl_cursor_buffer = wl_cursor_image_get_buffer(state->wl_cursor_image);
+    state->wl_cursor_surface = wl_compositor_create_surface(state->compositor);
+    wl_surface_attach(state->wl_cursor_surface, wl_cursor_buffer, 0, 0);
+    wl_surface_commit(state->wl_cursor_surface);
+}
+
+static void wl_keyboard_keymap(void *data, struct wl_keyboard *wl_keyboard, uint32_t format, int32_t fd, uint32_t size){
+    struct client_state* state = data;
+    if (format==WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1){
+        char* map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (map_shm == MAP_FAILED){
+            printf("Error allocating shared memory.\n");
+        }else{
+            struct xkb_keymap* xkb_keymap = xkb_keymap_new_from_string(state->xkb_context, map_shm, format, XKB_KEYMAP_COMPILE_NO_FLAGS);
+            munmap(map_shm,size);
+            close(fd);
+
+            struct xkb_state* xkb_state = xkb_state_new(xkb_keymap);
+            xkb_keymap_unref(state->xkb_keymap);
+            xkb_state_unref(state->xkb_state);
+            state->xkb_keymap = xkb_keymap;
+            state->xkb_state = xkb_state;
+        }
+    }else{
+        printf("Wrong keymap format.\n");
+    }
+}
+
+static void wl_keyboard_enter(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface, struct wl_array *keys){
+    struct client_state* state = data;
+    printf("Keyboard entered. Keys pressed:\n");
+    uint32_t* key;
+    wl_array_for_each(key, keys){
+        char buf[128];
+        uint32_t keycode = *key + 8;
+        xkb_keysym_t sym = xkb_state_key_get_one_sym(state->xkb_state, keycode);
+        xkb_keysym_get_name(sym,buf,sizeof(buf));
+        printf("Sym: %-12s (%d), ",buf,sym);
+        xkb_state_key_get_utf8(state->xkb_state, keycode, buf, sizeof(buf));
+        printf("UTF-8: %s\n",buf);
+    }
+}
+
+static void wl_keyboard_leave(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, struct wl_surface *surface){
+    printf("Keyboard left the surface.\n");
+}
+
+static void wl_keyboard_key(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t time, uint32_t key, uint32_t state){
+    struct client_state* client_state = data;
+    char buf[128];
+    uint32_t keycode = key + 8;
+    xkb_keysym_t sym = xkb_state_key_get_one_sym(client_state->xkb_state, keycode);
+    xkb_keysym_get_name(sym,buf,sizeof(buf));
+    const char* action = state == WL_KEYBOARD_KEY_STATE_PRESSED ? "Pressed" : "Released";
+    printf("%s Sym: %-12s (%d), ",action,buf,sym);
+    xkb_state_key_get_utf8(client_state->xkb_state, keycode, buf, sizeof(buf));
+    printf("UTF-8: %s\n",buf);
+}
+
+static void wl_keyboard_modifiers(void *data, struct wl_keyboard *wl_keyboard, uint32_t serial, uint32_t mods_depressed, uint32_t mods_latched, uint32_t mods_locked, uint32_t group){
+    struct client_state* state = data;
+    xkb_state_update_mask(state->xkb_state,mods_depressed, mods_latched, mods_locked, 0, 0, group);
+}
+
+// event when a key is held down
+static void wl_keyboard_repeat_info(void *data, struct wl_keyboard *wl_keyboard, int32_t rate, int32_t delay){
+
+}
+
+static const struct wl_keyboard_listener wl_keyboard_listener = {
+        .keymap = wl_keyboard_keymap,
+        .enter = wl_keyboard_enter,
+        .leave = wl_keyboard_leave,
+        .key = wl_keyboard_key,
+        .modifiers = wl_keyboard_modifiers,
+        .repeat_info = wl_keyboard_repeat_info
+};
+
+
+void wl_seat_capabilities(void *data, struct wl_seat *wl_seat, uint32_t capabilities){
+    struct client_state* state = data;
+    bool pointer_capability = capabilities & WL_SEAT_CAPABILITY_POINTER;
+    bool keyboard_capability = capabilities & WL_SEAT_CAPABILITY_KEYBOARD;
+
+    // pointer setup/release
+    if (pointer_capability && state->wl_pointer == NULL){
+        map_cursor_image(data);
+        state->wl_pointer = wl_seat_get_pointer(state->wl_seat);
+        wl_pointer_add_listener(state->wl_pointer, &wl_pointer_listener, state);
+    }else if(!pointer_capability && state->wl_pointer != NULL){
+        wl_pointer_release(state->wl_pointer);
+        state->wl_pointer = NULL;
+    }
+    // keyboard setup/release
+    if (keyboard_capability && state->wl_keyboard == NULL){
+        state->wl_keyboard = wl_seat_get_keyboard(state->wl_seat);
+        wl_keyboard_add_listener(state->wl_keyboard, &wl_keyboard_listener, state);
+    }else if(!keyboard_capability && state->wl_keyboard != NULL){
+        wl_keyboard_release(state->wl_keyboard);
+        state->wl_keyboard = NULL;
+    }
+}
+
+void wl_seat_name(void *data, struct wl_seat *wl_seat, const char *name){
+    printf("Seat name: %s\n",name);
+}
+
+static const struct wl_seat_listener wl_seat_listener = {
+    .capabilities = wl_seat_capabilities,
+    .name = wl_seat_name
 };
 
 // gets called when new objects are added
@@ -144,6 +292,7 @@ static void registry_handle_global(void *data, struct wl_registry *wl_registry, 
           xdg_wm_base_add_listener(state->xdg_wm_base,&xdg_wm_base_listener,state);
       }else if(strcmp(interface, wl_seat_interface.name) == 0){
           state->wl_seat = wl_registry_bind(wl_registry, name, &wl_seat_interface, wl_seat_interface.version);
+          wl_seat_add_listener(state->wl_seat, &wl_seat_listener, state);
       }
 }
 
@@ -340,17 +489,7 @@ static const struct wl_callback_listener wl_surface_frame_listener = {
         .done = wl_surface_frame_done
 };
 
-void map_cursor_image(void* data){
-    struct client_state* state = data;
-    struct wl_cursor_theme* wl_cursor_theme = wl_cursor_theme_load("breeze_cursors", 24, state->shm);
-    struct wl_cursor* wl_cursor = wl_cursor_theme_get_cursor(wl_cursor_theme,"left_ptr");
-    state->wl_cursor_image = wl_cursor->images[0];
-    struct wl_buffer*  wl_cursor_buffer = wl_cursor_image_get_buffer(state->wl_cursor_image);
-    state->wl_cursor_surface = wl_compositor_create_surface(state->compositor);
-    wl_surface_attach(state->wl_cursor_surface, wl_cursor_buffer, 0, 0);
-    wl_surface_commit(state->wl_cursor_surface);
-    state->wl_pointer = wl_seat_get_pointer(state->wl_seat);
-}
+
 
 // TODO: displaying the tree with arrows up/down
 // up - loads a buffer with the tree
@@ -368,6 +507,7 @@ int main(int argc, char *argv[]){
     state.tree_type=rand()%2;
     state.mouse_clicked=false;
     state.is_drawing=true;
+    state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     // connects the display with the given name(NULL=regrow-0)
     state.display = wl_display_connect(NULL);
     if(!state.display){
@@ -384,10 +524,6 @@ int main(int argc, char *argv[]){
     // initialize default buffers
     state.emptyBuffer = create_empty_buffer(&state);
     state.treeBuffer = draw_frame(&state);
-
-    // setup cursor
-    map_cursor_image(&state);
-    wl_pointer_add_listener(state.wl_pointer, &wl_pointer_listener, &state);
 
     state.wl_surface = wl_compositor_create_surface(state.compositor);
 
