@@ -37,8 +37,10 @@ struct client_state{
     uint16_t tree_size;
     uint16_t branch_width;
     uint16_t tree_type;
-    bool mouse_clicked;
+    uint16_t width;
+    uint16_t height;
     bool is_drawing;
+    bool closed;
 
     struct wl_buffer* treeBuffer;
     struct wl_buffer* emptyBuffer;
@@ -353,18 +355,17 @@ void draw_tree(uint32_t* data, uint16_t width, uint16_t height, uint16_t branch_
 }
 
 static struct wl_buffer *draw_frame(struct client_state *state){
-    const int width = 1920, height=1000;
     // each pixel contains 4 bytes
-    const int stride = width*4;
+    const int stride = state->width*4;
     // velicina buffera
-    const int shm_pool_size = height * stride;
+    const int shm_pool_size = state->height * stride;
     int fd = allocate_shm_file(shm_pool_size);
 
     // mmap vraca pointer na alociranu memoriju
     uint32_t *pool_data = mmap(NULL,shm_pool_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     // struktura koja moze drzati buffere
     struct wl_shm_pool *pool = wl_shm_create_pool(state->shm,fd,shm_pool_size);
-    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,width,height,stride,WL_SHM_FORMAT_XRGB8888);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,state->width,state->height,stride,WL_SHM_FORMAT_XRGB8888);
 
     wl_shm_pool_destroy(pool);
     close(fd);
@@ -376,10 +377,10 @@ static struct wl_buffer *draw_frame(struct client_state *state){
 
     if (state->tree_type==0) {
         // draw tree
-        draw_tree(pool_data, width, height, state->branch_width);
+        draw_tree(pool_data, state->width, state->height, state->branch_width);
     }else{
         //draw new tree
-        draw_tree_new(pool_data,width/2+width*(height-1),width,height,state->tree_size,state->branch_width);
+        draw_tree_new(pool_data,state->width/2+state->width*(state->height-1),state->width,state->height,state->tree_size,state->branch_width);
 
     }
 //    for (int y = 0; y < height; ++y) {
@@ -406,11 +407,10 @@ static struct wl_buffer *draw_frame(struct client_state *state){
 }
 
 static struct wl_buffer* create_empty_buffer(struct client_state* state){
-    const int width = 1920, height=1000;
     // each pixel contains 4 bytes
-    const int stride = width*4;
+    const int stride = state->width*4;
     // velicina buffera
-    const int shm_pool_size = height * stride;
+    const int shm_pool_size = state->height * stride;
     // create a file with random name of given pool size filled with "0"
     int fd = allocate_shm_file(shm_pool_size);
 
@@ -419,7 +419,7 @@ static struct wl_buffer* create_empty_buffer(struct client_state* state){
     // zatrazimo od compositora da sebi mapira istu memoriju kao i client. POOL NIJE BUFFER
     struct wl_shm_pool *pool = wl_shm_create_pool(state->shm,fd,shm_pool_size);
     // iz pool-a mozemo alocirati buffere zadane velicine koji pocinju sa zadanim offsetom u poolu i imaju zadani format
-    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,width,height,stride,WL_SHM_FORMAT_XRGB8888);
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0,state->width,state->height,stride,WL_SHM_FORMAT_XRGB8888);
 
     wl_shm_pool_destroy(pool);
     close(fd);
@@ -454,9 +454,9 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
 
     if (state->last_frame!=0){
         state->offset++;
-        if (state->height_render < 1000)
+        if (state->height_render < state->height)
             state->height_render++;
-        if (state->width_render<1920)
+        if (state->width_render < state->width)
             state->width_render++;
     }
     if (state->is_drawing && state->currentRow>0) {
@@ -465,11 +465,11 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
     }else{
         state->is_drawing=false;
         state->currentRow +=5;
-        if (state->currentRow==1000){
+        if (state->currentRow==state->height){
             wl_buffer_destroy(state->treeBuffer);
             state->is_drawing=true;
-            state->branch_width=rand()%(1920/2)+50;
-            state->tree_size=rand()%(1000/2)+100;
+            state->branch_width=rand()%(state->width/2)+50;
+            state->tree_size=rand()%(state->height/2)+100;
             state->tree_type=rand()%2;
             state->treeBuffer = draw_frame(state);
             wl_surface_attach(state->wl_surface,state->treeBuffer,0,0);
@@ -478,7 +478,7 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
         }
     }
     //struct wl_buffer *buffer = draw_frame(state);
-    wl_surface_damage_buffer(state->wl_surface,0,state->currentRow,1920,1);
+    wl_surface_damage_buffer(state->wl_surface,0,state->currentRow,state->width,1);
     wl_surface_commit(state->wl_surface);
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME,&ts);
@@ -489,6 +489,35 @@ static const struct wl_callback_listener wl_surface_frame_listener = {
         .done = wl_surface_frame_done
 };
 
+static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height, struct wl_array *states){
+    struct client_state* state = data;
+    if (width == 0 || height == 0){
+        return;
+    }
+    state->width = width;
+    state->height = height;
+}
+
+static void xdg_toplevel_configure_bounds(void *data, struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height){
+
+}
+
+static void xdg_toplevel_close(void *data, struct xdg_toplevel *xdg_toplevel){
+    struct client_state* state = data;
+    state->closed = true;
+}
+
+static void xdg_toplevel_wm_capabilities(void *data, struct xdg_toplevel *xdg_toplevel, struct wl_array *capabilities){
+
+}
+
+static const struct xdg_toplevel_listener xdg_toplevel_listener = {
+        .configure = xdg_toplevel_configure,
+        .configure_bounds = xdg_toplevel_configure_bounds,
+        .close = xdg_toplevel_close,
+        .wm_capabilities = xdg_toplevel_wm_capabilities,
+};
+
 
 
 // TODO: displaying the tree with arrows up/down
@@ -497,7 +526,8 @@ static const struct wl_callback_listener wl_surface_frame_listener = {
 int main(int argc, char *argv[]){
     srand(time(NULL));
     struct client_state state = {0};
-    state.currentRow=1000;
+    state.width=640;
+    state.height=480;
     state.height_render=0;
     state.width_render=0;
     state.offset=0;
@@ -505,8 +535,8 @@ int main(int argc, char *argv[]){
     state.branch_width=rand()%(1920/2)+50;
     state.tree_size=rand()%(1000/2)+100;
     state.tree_type=rand()%2;
-    state.mouse_clicked=false;
     state.is_drawing=true;
+    state.currentRow=state.width;
     state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     // connects the display with the given name(NULL=regrow-0)
     state.display = wl_display_connect(NULL);
@@ -530,6 +560,7 @@ int main(int argc, char *argv[]){
     state.xdg_surface = xdg_wm_base_get_xdg_surface(state.xdg_wm_base,state.wl_surface);
     xdg_surface_add_listener(state.xdg_surface, &surface_listener,&state);
     state.xdg_toplevel = xdg_surface_get_toplevel(state.xdg_surface);
+    xdg_toplevel_add_listener(state.xdg_toplevel, &xdg_toplevel_listener, &state);
     xdg_toplevel_set_title(state.xdg_toplevel,"My window!");
 
     wl_surface_commit(state.wl_surface);
