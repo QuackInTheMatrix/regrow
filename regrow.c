@@ -11,6 +11,7 @@
 #include <wayland-client.h>
 #include <wayland-cursor.h>
 #include "xdg-shell-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 #include <math.h>
 #include <stdbool.h>
 #include <xkbcommon/xkbcommon.h>
@@ -26,11 +27,13 @@ struct client_state{
     struct wl_surface *wl_surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *xdg_toplevel;
+    struct zxdg_decoration_manager_v1 *zxdg_decoration_manager_v1;
+    struct zxdg_toplevel_decoration_v1 *zxdg_toplevel_decoration_v1;
     struct wl_pointer *wl_pointer;
     struct wl_keyboard *wl_keyboard;
 
     uint8_t offset;
-    uint32_t last_frame;
+    uint8_t step;
     uint16_t height_render;
     uint16_t width_render;
     uint16_t currentRow;
@@ -121,6 +124,10 @@ void wl_pointer_motion_handle(void *data, struct wl_pointer *wl_pointer, uint32_
 // event that's emitted when the pointer presses a button while on the surface(left click for example)
 void wl_pointer_button_handle(void *data, struct wl_pointer *wl_pointer, uint32_t serial, uint32_t time, uint32_t button, uint32_t state){
     printf("button: 0x%x state: %d\n", button, state);
+    if (button == 0x110 && state == 1){
+        struct client_state* client_state = data;
+        xdg_toplevel_move(client_state->xdg_toplevel, client_state->wl_seat, serial);
+    }
 }
 
 // event that's emitted when the pointer scrolls by mouse wheel, touch pad, etc.
@@ -295,6 +302,8 @@ static void registry_handle_global(void *data, struct wl_registry *wl_registry, 
       }else if(strcmp(interface, wl_seat_interface.name) == 0){
           state->wl_seat = wl_registry_bind(wl_registry, name, &wl_seat_interface, wl_seat_interface.version);
           wl_seat_add_listener(state->wl_seat, &wl_seat_listener, state);
+      }else if(strcmp(interface, zxdg_decoration_manager_v1_interface.name)==0){
+          state->zxdg_decoration_manager_v1 = wl_registry_bind(wl_registry, name, &zxdg_decoration_manager_v1_interface, zxdg_decoration_manager_v1_interface.version);
       }
 }
 
@@ -354,7 +363,7 @@ void draw_tree(uint32_t* data, uint16_t width, uint16_t height, uint16_t branch_
     draw_branches(data,position,&width,&height,&branch_size);
 }
 
-static struct wl_buffer *draw_frame(struct client_state *state){
+static void draw_frame(struct client_state *state){
     // each pixel contains 4 bytes
     const int stride = state->width*4;
     // velicina buffera
@@ -403,10 +412,10 @@ static struct wl_buffer *draw_frame(struct client_state *state){
 
     munmap(pool_data,shm_pool_size);
     wl_buffer_add_listener(buffer,&buffer_listener, NULL);
-    return buffer;
+    state->treeBuffer = buffer;
 }
 
-static struct wl_buffer* create_empty_buffer(struct client_state* state){
+static void create_empty_buffer(struct client_state* state){
     // each pixel contains 4 bytes
     const int stride = state->width*4;
     // velicina buffera
@@ -426,14 +435,19 @@ static struct wl_buffer* create_empty_buffer(struct client_state* state){
 
     munmap(pool_data,shm_pool_size);
     wl_buffer_add_listener(buffer,&buffer_listener, NULL);
-    return buffer;
+    state->emptyBuffer = buffer;
 }
 
 void xdg_surface_handle_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial){
     struct client_state *state = data;
+    printf("Width: %d, Height: %d\n",state->width, state->height);
     //acknowledge that the next frame is ready
     xdg_surface_ack_configure(state->xdg_surface,serial);
 
+    wl_buffer_destroy(state->treeBuffer);
+    wl_buffer_destroy(state->emptyBuffer);
+    draw_frame(state);
+    create_empty_buffer(state);
     wl_surface_attach(state->wl_surface,state->emptyBuffer,0,0);
     wl_surface_commit(state->wl_surface);
 }
@@ -452,26 +466,26 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
     wl_callback = wl_surface_frame(state->wl_surface);
     wl_callback_add_listener(wl_callback,&wl_surface_frame_listener,state);
 
-    if (state->last_frame!=0){
+    if (state->is_drawing){
         state->offset++;
         if (state->height_render < state->height)
             state->height_render++;
         if (state->width_render < state->width)
             state->width_render++;
     }
-    if (state->is_drawing && state->currentRow>0) {
-        state->currentRow -= 5;
+    if (state->is_drawing && state->currentRow-state->step > 0) {
+        state->currentRow -= state->step;
         wl_surface_attach(state->wl_surface,state->treeBuffer,0,0);
     }else{
         state->is_drawing=false;
-        state->currentRow +=5;
+        state->currentRow += state->step;
         if (state->currentRow==state->height){
             wl_buffer_destroy(state->treeBuffer);
             state->is_drawing=true;
             state->branch_width=rand()%(state->width/2)+50;
             state->tree_size=rand()%(state->height/2)+100;
             state->tree_type=rand()%2;
-            state->treeBuffer = draw_frame(state);
+            draw_frame(state);
             wl_surface_attach(state->wl_surface,state->treeBuffer,0,0);
         }else{
             wl_surface_attach(state->wl_surface,state->emptyBuffer,0,0);
@@ -480,9 +494,6 @@ void wl_surface_frame_done (void *data, struct wl_callback *wl_callback, uint32_
     //struct wl_buffer *buffer = draw_frame(state);
     wl_surface_damage_buffer(state->wl_surface,0,state->currentRow,state->width,1);
     wl_surface_commit(state->wl_surface);
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME,&ts);
-    state->last_frame = ts.tv_sec;
 }
 
 static const struct wl_callback_listener wl_surface_frame_listener = {
@@ -496,6 +507,8 @@ static void xdg_toplevel_configure(void *data, struct xdg_toplevel *xdg_toplevel
     }
     state->width = width;
     state->height = height;
+    state->currentRow = height;
+    state->is_drawing = true;
 }
 
 static void xdg_toplevel_configure_bounds(void *data, struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height){
@@ -515,7 +528,7 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
         .configure = xdg_toplevel_configure,
         .configure_bounds = xdg_toplevel_configure_bounds,
         .close = xdg_toplevel_close,
-        .wm_capabilities = xdg_toplevel_wm_capabilities,
+        .wm_capabilities = xdg_toplevel_wm_capabilities
 };
 
 
@@ -531,12 +544,12 @@ int main(int argc, char *argv[]){
     state.height_render=0;
     state.width_render=0;
     state.offset=0;
-    state.last_frame=0;
-    state.branch_width=rand()%(1920/2)+50;
-    state.tree_size=rand()%(1000/2)+100;
+    state.branch_width=rand()%(state.width/2)+50;
+    state.tree_size=rand()%(state.height/2)+100;
     state.tree_type=rand()%2;
     state.is_drawing=true;
     state.currentRow=state.width;
+    state.step = 5;
     state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     // connects the display with the given name(NULL=regrow-0)
     state.display = wl_display_connect(NULL);
@@ -552,8 +565,8 @@ int main(int argc, char *argv[]){
     wl_display_roundtrip(state.display);
 
     // initialize default buffers
-    state.emptyBuffer = create_empty_buffer(&state);
-    state.treeBuffer = draw_frame(&state);
+    create_empty_buffer(&state);
+    draw_frame(&state);
 
     state.wl_surface = wl_compositor_create_surface(state.compositor);
 
@@ -563,6 +576,9 @@ int main(int argc, char *argv[]){
     xdg_toplevel_add_listener(state.xdg_toplevel, &xdg_toplevel_listener, &state);
     xdg_toplevel_set_title(state.xdg_toplevel,"My window!");
 
+    state.zxdg_toplevel_decoration_v1 = zxdg_decoration_manager_v1_get_toplevel_decoration(state.zxdg_decoration_manager_v1, state.xdg_toplevel);
+    zxdg_toplevel_decoration_v1_set_mode(state.zxdg_toplevel_decoration_v1, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+
     wl_surface_commit(state.wl_surface);
 
     struct wl_callback *wl_callback = wl_surface_frame(state.wl_surface);
@@ -571,6 +587,9 @@ int main(int argc, char *argv[]){
     // waits until a server sends an event
     while(wl_display_dispatch(state.display) != -1){
         // code that executes after an event is processed
+        if (state.closed){
+            break;
+        }
     }
     wl_display_disconnect(state.display);
     return 0;
