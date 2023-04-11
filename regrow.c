@@ -291,7 +291,7 @@ static void registry_handle_global(void *data, struct wl_registry *wl_registry, 
 //    printf("Interface: %s, version: %d, name: %d\n",interface,version,name);
       struct client_state *state = data;
       if (strcmp(interface,wl_compositor_interface.name)==0){
-          state->compositor = wl_registry_bind(wl_registry,name,&wl_compositor_interface,wl_compositor_interface.version);
+          state->compositor = wl_registry_bind(wl_registry,name,&wl_compositor_interface,5);
       }
       else if(strcmp(interface,wl_shm_interface.name)==0){
           state->shm = wl_registry_bind(wl_registry,name,&wl_shm_interface,wl_shm_interface.version);
@@ -300,7 +300,7 @@ static void registry_handle_global(void *data, struct wl_registry *wl_registry, 
           state->xdg_wm_base = wl_registry_bind(wl_registry,name,&xdg_wm_base_interface,4);
           xdg_wm_base_add_listener(state->xdg_wm_base,&xdg_wm_base_listener,state);
       }else if(strcmp(interface, wl_seat_interface.name) == 0){
-          state->wl_seat = wl_registry_bind(wl_registry, name, &wl_seat_interface, wl_seat_interface.version);
+          state->wl_seat = wl_registry_bind(wl_registry, name, &wl_seat_interface, 8);
           wl_seat_add_listener(state->wl_seat, &wl_seat_listener, state);
       }else if(strcmp(interface, zxdg_decoration_manager_v1_interface.name)==0){
           state->zxdg_decoration_manager_v1 = wl_registry_bind(wl_registry, name, &zxdg_decoration_manager_v1_interface, zxdg_decoration_manager_v1_interface.version);
