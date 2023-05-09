@@ -536,6 +536,8 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener = {
 // TODO: displaying the tree with arrows up/down
 // up - loads a buffer with the tree
 // down - loads an empty buffer to overwrite/delete the tree
+
+// TODO: kada se window resizea potrebno je ponovno renderati sve ispod trenutne linije zbog novog buffer-a
 int main(int argc, char *argv[]){
     srand(time(NULL));
     struct client_state state = {0};
